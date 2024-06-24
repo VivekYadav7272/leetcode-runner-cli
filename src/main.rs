@@ -1,229 +1,108 @@
-mod file_parser;
-mod leetcode_api;
-use colored::Colorize;
-use leetcode_api::leetcode::LeetCode;
-use std::process::ExitCode;
-
+use crate::args::Cli;
 use crate::file_parser::codefile::CodeFile;
-use crate::leetcode_api::worker::{ExecutionResult, SubmissionResult};
+use crate::utils::{execute_testcases, pack, submit};
 
+use args::Commands;
 use clap::Parser;
+use colored::Colorize;
+use eyre::{bail, Result};
+use handlers::leetcode::LeetCode;
 
-#[derive(Parser, Debug)]
-#[command(version)]
-struct Args {
-    /// Authenticate with LeetCode
-    #[arg(short, long, action)]
-    auth: bool,
-    /// Code to run or submit
-    #[arg(short, long, default_value_t = String::new())]
-    file: String,
-    /// Executes the testcases from given file
-    #[arg(short, long, default_value_t = String::new())]
-    testcase: String,
-    /// Save question as HTML
-    #[arg(short, long, default_value_t = String::new())]
-    question: String,
-    /// Submit the code after testcase execution
-    #[arg(short, long, action)]
-    submit: bool,
-}
+mod args;
+mod file_parser;
+mod handlers;
+mod utils;
 
-fn main() -> ExitCode {
-    let args = Args::parse();
-    let key = "LC_COOKIE";
-    let Some(cookie) = std::env::var_os(key) else {
-        println!("{} is not set in the environment.", key);
-        return ExitCode::FAILURE;
-    };
-    let cookie = cookie.to_str().expect("Invalid unicode in cookie");
+const LC_COOKIE_ENV_KEY: &str = "LC_COOKIE";
+const GIT_README: &str = "README.md";
+const DAILY_CHALLENGE: &str = "daily_challenge.html";
 
-    let mut leetcode = LeetCode::new();
-    let lc = leetcode.authenticate(cookie).unwrap();
+fn main() -> Result<()> {
+    let cli = Cli::parse();
 
-    if args.auth {
-        let metadata = lc.get_metadata();
-        if metadata.is_ok() {
-            println!("Authenticated successfully!\n");
-            metadata.unwrap().display();
-            return ExitCode::SUCCESS;
-        } else {
-            let error = metadata.unwrap_err();
-            println!("Authentication Error : {}", error);
-            return ExitCode::FAILURE;
+    let cookie = std::env::var_os(LC_COOKIE_ENV_KEY)
+        .ok_or_else(|| eyre::eyre!("{} is not set in the environment.", LC_COOKIE_ENV_KEY))?
+        .into_string()
+        .map_err(|_| eyre::eyre!("Invalid Unicode found"))?;
+
+    let lc = LeetCode::new().authenticate(&cookie)?;
+
+    match cli.command {
+        Some(Commands::Auth) => match lc.get_metadata() {
+            Ok(metadata) => println!("{}", metadata),
+            Err(err) => bail!(err),
+        },
+        Some(Commands::DailyChallenge { no_code_save }) => {
+            let daily_challenge = lc.get_daily_challenge()?;
+            println!("Today's Daily Challenge:\n{}", daily_challenge);
+            let title = daily_challenge.question.titleSlug;
+            if !no_code_save {
+                lc.save_boiler_code(&title)?;
+            }
+
+            let question = lc.question_content(&title)?;
+            std::fs::write(DAILY_CHALLENGE, question.content)?;
+            println!("Saved question as HTML to {}", DAILY_CHALLENGE.cyan());
+            open::that(DAILY_CHALLENGE)?;
         }
-    }
-
-    if args.question != "" {
-        let question = lc.question_content(&args.question);
-        if question.is_ok() {
-            let question = question.unwrap();
-            let filename = format!("{}.html", args.question);
-            // save to filename
-            if let Ok(_) = std::fs::write(&filename, question.content) {
-                println!("Saved question as HTML to {}", filename);
-                return ExitCode::SUCCESS;
+        Some(Commands::Question {
+            question_name,
+            no_code_save,
+        }) => {
+            let question_name = if let Some(idx) = question_name.find("leetcode.com/problems/") {
+                let question_title = question_name[idx..]
+                    .split_whitespace()
+                    .next()
+                    .expect("Should be Some since the find method succeed")
+                    .split('/')
+                    .skip(2)
+                    .next()
+                    .ok_or_else(|| eyre::eyre!("Invalid link, expected question identifier"))?;
+                question_title
             } else {
-                println!("Error saving question as HTML");
-                return ExitCode::FAILURE;
+                &question_name
+            };
+            if !no_code_save {
+                lc.save_boiler_code(question_name)?;
             }
-        };
-    }
 
-    let filename = args.file;
+            let question = lc.question_content(question_name)?;
+            let filename = format!("{}.html", question_name);
+            // save to filename
+            std::fs::write(&filename, question.content)?;
+            println!("Saved question as HTML to {}", filename.cyan());
+            open::that(filename)?;
+        }
+        Some(Commands::Run {
+            file,
+            testcase_file: testcases,
+        }) => {
+            execute_testcases(file, testcases, &lc)?;
+        }
+        Some(Commands::FastSubmit { file }) => {
+            let code_file = if let Some(path) = file {
+                CodeFile::from_file(&path)?
+            } else {
+                CodeFile::from_dir(".")?
+            };
 
-    let code: CodeFile;
-    if filename != "" {
-        code = CodeFile::from_file(filename);
-    } else {
-        code = CodeFile::from_dir();
-    }
-    let testcase = args.testcase;
-    let is_correct: bool;
-    if testcase != "" {
-        if let Ok(mut testcase) = std::fs::File::open(testcase) {
-            let mut data_input = String::new();
-            std::io::Read::read_to_string(&mut testcase, &mut data_input).unwrap();
-            match lc.execute(&code, data_input) {
-                Ok(result) => match result {
-                    ExecutionResult::Success(result) => {
-                        is_correct = result.is_correct();
-                        result.display();
-                    }
-                    ExecutionResult::LimitExceeded(limit_exceeded) => {
-                        println!("{}", limit_exceeded.status_msg);
-                        println!("Time Elapsed : {}", limit_exceeded.elapsed_time);
-                        println!("Memory : {}", limit_exceeded.memory);
-                        return ExitCode::FAILURE;
-                    }
-                    ExecutionResult::CompileError(compile_error) => {
-                        println!(
-                            "Compile Error!\nError Message : {}\n\nFull error message :\n{}",
-                            compile_error.compile_error, compile_error.full_compile_error
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                    ExecutionResult::RuntimeError(runtime_error) => {
-                        println!(
-                            "Runtime Error!\nError Message : {}\n\nFull error message :\n{}",
-                            runtime_error.runtime_error, runtime_error.full_runtime_error
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                    ExecutionResult::PendingResult(state) => {
-                        println!("Pending Result!");
-                        println!("State : {:?}", state.state());
-                        return ExitCode::FAILURE;
-                    }
-                    ExecutionResult::Unknown(_) => {
-                        println!("Unknown Error!");
-                        return ExitCode::FAILURE;
-                    }
-                },
-                Err(e) => {
-                    println!("Some error occured! {e}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        } else {
-            println!("Testcase file not found!");
-            return ExitCode::FAILURE;
+            submit(&lc, code_file)?;
         }
-    } else {
-        match lc.execute_default(&code) {
-            Ok(result) => match result {
-                ExecutionResult::Success(result) => {
-                    is_correct = result.is_correct();
-                    result.display();
-                }
-                ExecutionResult::LimitExceeded(limit_exceeded) => {
-                    println!("{}", limit_exceeded.status_msg);
-                    println!("Time Elapsed : {}", limit_exceeded.elapsed_time);
-                    println!("Memory : {}", limit_exceeded.memory);
-                    return ExitCode::FAILURE;
-                }
-                ExecutionResult::CompileError(compile_error) => {
-                    println!(
-                        "Compile Error!\nError Message : {}\n\nFull error message :\n{}",
-                        compile_error.compile_error, compile_error.full_compile_error
-                    );
-                    return ExitCode::FAILURE;
-                }
-                ExecutionResult::RuntimeError(runtime_error) => {
-                    println!(
-                        "Runtime Error!\nError Message : {}\n\nFull error message :\n{}",
-                        runtime_error.runtime_error, runtime_error.full_runtime_error
-                    );
-                    return ExitCode::FAILURE;
-                }
-                ExecutionResult::PendingResult(state) => {
-                    println!("Pending Result!");
-                    println!("State : {:?}", state.state());
-                    return ExitCode::FAILURE;
-                }
-                ExecutionResult::Unknown(_) => {
-                    println!("Unknown Error!");
-                    return ExitCode::FAILURE;
-                }
-            },
-            Err(e) => {
-                println!("Some error occured! {e}");
-                return ExitCode::FAILURE;
+        Some(Commands::Submit {
+            file,
+            testcase_file: testcases,
+        }) => {
+            let (is_correct, code_file) = execute_testcases(file, testcases, &lc)?;
+            if is_correct {
+                submit(&lc, code_file)?;
+            } else {
+                bail!("Aborting submission due to failed testcase(s)".red().bold());
             }
         }
-    }
-    if !is_correct {
-        if args.submit {
-            println!(
-                "{}",
-                "Aborting submission due to failed testcase(s)!"
-                    .red()
-                    .bold()
-            );
-        }
-        return ExitCode::FAILURE;
-    }
-    if args.submit {
-        match lc.submit(&code) {
-            Ok(result) => match result {
-                SubmissionResult::Success(success) => success.display(),
-                SubmissionResult::LimitExceeded(wrong) => {
-                    wrong.display();
-                    return ExitCode::FAILURE;
-                }
-                SubmissionResult::PendingResult(state) => {
-                    println!("Pending Result!");
-                    println!("State : {:?}", state.state());
-                    return ExitCode::FAILURE;
-                }
-                SubmissionResult::CompileError(compile_err) => {
-                    println!(
-                        "\nSubmission failed due to Compile Error!\nError Message :\n{}\n\nFull error message :\n{}",
-                        compile_err.compile_error, compile_err.full_compile_error
-                    );
-                    return ExitCode::FAILURE;
-                }
-                SubmissionResult::RuntimeError(runtime_error) => {
-                    println!(
-                        "\nSubmission failed due to Runtime Error!\nError Message :\n{}\n\nFull error message :\n{}",
-                        runtime_error.runtime_error, runtime_error.full_runtime_error
-                    );
-                    return ExitCode::FAILURE;
-                }
-                SubmissionResult::Wrong(wrong) => {
-                    wrong.display();
-                    return ExitCode::FAILURE;
-                }
-                SubmissionResult::Unknown(_) => {
-                    println!("Unknown Error!");
-                    return ExitCode::FAILURE;
-                }
-            },
-            Err(e) => {
-                println!("Some error occured! {e}");
-                return ExitCode::FAILURE;
-            }
-        }
-    }
-    ExitCode::SUCCESS
+        Some(Commands::Pack { file }) => pack(&lc, file)?,
+
+        None => {}
+    };
+
+    Ok(())
 }

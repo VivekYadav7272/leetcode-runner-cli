@@ -1,4 +1,6 @@
-#[derive(Default)]
+use std::{fmt, str::FromStr};
+
+#[derive(Debug, Default, Clone, Copy)]
 pub enum Language {
     #[default]
     Rust,
@@ -11,38 +13,84 @@ pub enum Language {
     Kotlin,
     Swift,
     Typescript,
+    Csharp,
+    Ruby,
+    Scala,
+    PHP,
+    Racket,
+    Erlang,
+    Elixir,
+    Dart,
 }
-impl Language {
-    pub fn from_str(input: &str) -> Option<Language> {
-        match input {
-            "rs" => Some(Language::Rust),
-            "py" => Some(Language::Python3),
-            "cpp" => Some(Language::Cpp),
-            "java" => Some(Language::Java),
-            "c" => Some(Language::C),
-            "js" => Some(Language::Javascript),
-            "go" => Some(Language::Go),
-            "kt" => Some(Language::Kotlin),
-            "swift" => Some(Language::Swift),
-            "ts" => Some(Language::Typescript),
-            _ => None,
+
+impl fmt::Display for Language {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format!("{:?}", self).to_lowercase())
+    }
+}
+
+impl FromStr for Language {
+    type Err = eyre::ErrReport;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_ref() {
+            "rs" | "rust" => Ok(Language::Rust),
+            /* python creates ambiguity with Python2.7 and Python3
+             * as both are supported by leetcode, so we only allow python3 */
+            "py" /*| "python" */ | "python3" => Ok(Language::Python3),
+            "cpp" => Ok(Language::Cpp),
+            "java" => Ok(Language::Java),
+            "c" => Ok(Language::C),
+            "js" | "javascript" => Ok(Language::Javascript),
+            "go" | "golang" => Ok(Language::Go),
+            "kt" | "kotlin" => Ok(Language::Kotlin),
+            "swift" => Ok(Language::Swift),
+            "ts" | "typescript" => Ok(Language::Typescript),
+            "cs" | "csharp" => Ok(Language::Csharp),
+            "rb" | "ruby" => Ok(Language::Ruby),
+            "scala" => Ok(Language::Scala),
+            "php" => Ok(Language::PHP),
+            "rkt" | "racket" => Ok(Language::Racket),
+            "erl" | "erlang" => Ok(Language::Erlang),
+            "ex" | "elixer" => Ok(Language::Elixir),
+            "dart" => Ok(Language::Dart),
+            _ => Err(eyre::eyre!("Unknown language")),
         }
     }
-    pub fn to_str(&self) -> &str {
+}
+
+impl Language {
+    pub fn extension(&self) -> &str {
         match self {
-            Language::Rust => "rust",
-            Language::Python3 => "python3",
+            Language::Rust => "rs",
+            Language::Python3 => "py",
             Language::Cpp => "cpp",
             Language::Java => "java",
             Language::C => "c",
-            Language::Javascript => "javascript",
-            Language::Go => "golang",
-            Language::Kotlin => "kotlin",
+            Language::Javascript => "js",
+            Language::Go => "go",
+            Language::Kotlin => "kt",
             Language::Swift => "swift",
-            Language::Typescript => "typescript",
+            Language::Typescript => "ts",
+            Language::Csharp => "cs",
+            Language::Ruby => "rb",
+            Language::Scala => "scala",
+            Language::PHP => "php",
+            Language::Racket => "rkt",
+            Language::Erlang => "erl",
+            Language::Elixir => "ex",
+            Language::Dart => "dart",
         }
     }
-    pub fn to_string(&self) -> String {
-        self.to_str().to_string()
+
+    pub(crate) fn inline_comment_start(&self) -> &str {
+        use Language::*;
+        match self {
+            Rust | Cpp | C | Csharp | Javascript | Typescript | Kotlin | Java | Go | Scala
+            | Swift | Dart => "//",
+            Python3 | Ruby | PHP | Elixir => "#",
+            Racket => ";",
+            Erlang => "%",
+        }
     }
 }
